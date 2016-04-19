@@ -8152,6 +8152,30 @@ class RootExports(object):
         check_old_image_files(old)
         return import_old_image(old, name, version)
 
+    def buildXdgApp(self, target, nvr, jsonfile, arch, opts=None, priority=None):
+        """
+        Create an xdg-app from an already built RPM.
+        """
+
+        #verify JSON file exists
+        uploadpath = koji.pathinfo.work()
+        filepath = "%s/%s" % (uploadpath, jsonfile)
+        if not os.path.exists(filepath):
+            raise koji.GenericError, "no such file: %s" % filepath
+
+        taskOpts = {}
+
+        if priority:
+            if priority < 0:
+                if not context.session.hasPerm('admin'):
+                    raise koji.ActionNotAllowed, \
+                               'only admins may create high-priority tasks'
+
+            taskOpts['priority'] = koji.PRIO_DEFAULT + priority
+
+        taskOpts['arch'] = arch
+        return make_task('buildXdgApp', [target, nvr, jsonfile, arch, opts], **taskOpts)
+
     def hello(self,*args):
         return "Hello World"
 

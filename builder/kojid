@@ -3853,6 +3853,85 @@ class BuildIndirectionImageTask(OzImageTask):
         return report
 
 
+class BuildXdgAppTask(BaseBuildTask):
+    Methods = ['buildXdgApp']
+    _taskWeight = 1.5
+
+    def handler(self, target, nvr, jsonfile, arch, opts=None):
+        if opts is None:
+            opts = {}
+
+        target_info = self.session.getBuildTarget(target, strict=True)
+        build_tag = target_info['build_tag']
+        repo_info = self.getRepo(build_tag)
+        #check requested arches against build tag
+        buildconfig = self.session.getBuildConfig(build_tag)
+
+        build_runtime = opts.get('runtime')
+
+        data = koji.parse_NVR(nvr)
+        data['base_arch'], data['variant'] = koji.splitArch(arch)
+        if data['variant']:
+            nvra = "%(name)s-%(version)s-%(release)s~%(variant)s.%(base_arch)s" % data
+        else:
+            nvra = "%(name)s-%(version)s-%(release)s.%(base_arch)s" % data
+
+        # Wait for the build to be in a new repository
+        #task_id = self.session.host.subtask(method='waitrepo',
+        #                                    arglist=[target_info['build_tag_name'], None, nvr]],
+        #                                    label="wait",
+        #                                    parent=self.id)
+        #self.wait(task_id, all=True, failany=True)
+
+        repo_info = self.getRepo(target_info['build_tag_name'])
+        event_id = repo_info['create_event']
+        br_arch = self.find_arch(arch, self.session.host.getHost(), self.session.getBuildConfig(target_info['build_tag_name'], event=event_id))
+        buildroot = BuildRoot(self.session, self.options, target_info['build_tag_name'], br_arch, self.id,
+                              repo_id=repo_info['id'], install_group='app-create')
+
+        self.logger.info("Initializing buildroot")
+        buildroot.init()
+
+        self.logger.info("Initializing packages")
+        rv = buildroot.mock(['--install', nvra])
+        if rv:
+            buildroot.expire()
+            raise koji.BuildrootError, 'error installing packages, %s' % buildroot._mockResult(rv, logfile='mock_output.log')
+
+        workdir = '%s/app-build' % buildroot.rootdir()
+        koji.ensuredir(workdir)
+
+        self.logger.info("Making tarball")
+        if build_runtime:
+            cmd = ['/usr/bin/tar', 'cvf', workdir + '/app.tar', './']
+        else:
+            cmd = ['/usr/bin/tar', 'cvf', workdir + '/app.tar', 'app']
+        proc = subprocess.Popen(cmd, cwd=buildroot.rootdir(), close_fds=True)
+        ret = proc.wait()
+        if ret:
+            raise koji.BuildError, 'unable to create /app tarball'
+
+        json_basename = os.path.basename(jsonfile)
+        shutil.copy(jsonfile, os.path.join(workdir, json_basename))
+
+        self.logger.info("Installing packages to create runtime")
+        rv = buildroot.mock(['--install', 'fedora-app-build-utils'])
+        if rv:
+            buildroot.expire()
+            raise koji.BuildrootError, 'error installing packages, %s' % buildroot._mockResult(rv, logfile='mock_output.log')
+
+        bundle_name = nvr + '.' + data['base_arch'] + '.xdgapp'
+        flags = []
+        if build_runtime:
+            flags.append('--runtime')
+        cmd = ['--chroot', '--', '/usr/bin/fedora-app-create'] + flags + [tarname, json_basename, bundle_name]
+        rv = buildroot.mock(cmd, '--cwd', '/app-build')
+        if rv:
+            buildroot.expire()
+            raise koji.BuildrootError, 'error building app bundle, %s' % self._mockResult(rv, logfile='build.log')
+
+        self.uploadFile(workdir + '/' + bundle_name)
+
 class BuildSRPMFromSCMTask(BaseBuildTask):
 
     Methods = ['buildSRPMFromSCM']

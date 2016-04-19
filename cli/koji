@@ -4249,6 +4249,13 @@ def _do_parseTaskParams(session, method, task_id):
         lines.append("Build Target: %s" % params[2])
         if len(params) > 3:
             _handleOpts(lines, params[3])
+    elif method == 'xdg-app-build':
+        lines.append("Target: %s" % params[0])
+        lines.append("NVR: %s" % params[1])
+        lines.append("Source JSON: %s" % params[2])
+        lines.append("Arch: %s" % params[3])
+        if len(params) > 4:
+            _handleOpts(lines, params[4])
     elif method == 'vmExec':
         lines.append("VM: %s" % params[0])
         lines.append("Exec Params:")
@@ -5596,6 +5603,62 @@ def _build_image_oz(options, task_opts, session, args):
     if task_opts.wait or (task_opts.wait is None and not _running_in_bg()):
         session.logout()
         return watch_tasks(session, [task_id], quiet=options.quiet)
+    else:
+        return
+
+def handle_xdg_app_build(options, session, args):
+    """Build a xdg-app from a previously built RPM"""
+
+    usage = _("usage: %prog xdg-app-build [options] target nvr jsonfile arch")
+    usage += _("\n(Specify the --help global option for a list of other " +
+               "help options)")
+    parser = OptionParser(usage=usage)
+    parser.add_option("--runtime", action="store_true",
+                      help=_("Build a runtime instead of an application"))
+    parser.add_option("--background", action="store_true",
+                      help=_("Run the build at a lower priority"))
+    parser.add_option("--wait", action="store_true",
+                      help=_("Wait on the build, even if running in the background"))
+    parser.add_option("--nowait", action="store_false", dest="wait",
+                      help=_("Don't wait on build"))
+    parser.add_option("--noprogress", action="store_true",
+                      help=_("Do not display progress of the upload"))
+    parser.add_option("--quiet", action="store_true",
+                      help=_("Do not print the task information"), default=options.quiet)
+
+    (build_opts, args) = parser.parse_args(args)
+    if len(args) != 4:
+        parser.error(_("Exactly four arguments (a build target, a build NVR, the metadata JSON file, and the architecture) are required"))
+        assert False
+    activate_session(session)
+    target = args[0]
+    nvr = args[1]
+    jsonfile = args[2]
+    arch = args[3]
+
+    #upload jsonfile
+    if not build_opts.quiet:
+        print "Uploading jsonfile: %s" % jsonfile
+    serverdir = _unique_path('cli-build-xdg-app')
+    if _running_in_bg() or build_opts.noprogress or build_opts.quiet:
+        callback = None
+    else:
+        callback = _progress_callback
+    session.uploadWrapper(jsonfile, serverdir, callback=callback)
+    print
+    jsonfile = "%s/%s" % (serverdir, os.path.basename(jsonfile))
+
+    priority = None
+    if build_opts.background:
+        #relative to koji.PRIO_DEFAULT
+        priority = 5
+    task_id = session.buildXdgApp(target, nvr, jsonfile, arch, priority=priority)
+    if not build_opts.quiet:
+        print "Created task:", task_id
+        print "Task info: %s/taskinfo?taskID=%s" % (options.weburl, task_id)
+    if build_opts.wait or (build_opts.wait is None and not _running_in_bg()):
+        session.logout()
+        return watch_tasks(session, [task_id], quiet=build_opts.quiet)
     else:
         return
 
