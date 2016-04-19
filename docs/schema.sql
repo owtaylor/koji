@@ -530,6 +530,7 @@ CREATE TABLE tag_packages (
 	owner INTEGER NOT NULL REFERENCES users(id),
 	blocked BOOLEAN NOT NULL DEFAULT FALSE,
 	extra_arches TEXT,
+        arch_variants TEXT,
 -- versioned - see earlier description of versioning
 	create_event INTEGER NOT NULL REFERENCES events(id) DEFAULT get_event(),
 	revoke_event INTEGER REFERENCES events(id),
