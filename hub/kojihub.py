@@ -828,17 +828,17 @@ def _pkglist_remove(tag_id, pkg_id):
     update.make_revoke()  #XXX user_id?
     update.execute()
 
-def _pkglist_add(tag_id, pkg_id, owner, block, extra_arches):
+def _pkglist_add(tag_id, pkg_id, owner, block, extra_arches, arch_variants):
     #revoke old entry (if present)
     _pkglist_remove(tag_id, pkg_id)
-    data = dslice(locals(), ('tag_id', 'owner', 'extra_arches'))
+    data = dslice(locals(), ('tag_id', 'owner', 'extra_arches', 'arch_variants'))
     data['package_id'] = pkg_id
     data['blocked'] = block
     insert = InsertProcessor('tag_packages', data=data)
     insert.make_create()  #XXX user_id?
     insert.execute()
 
-def pkglist_add(taginfo,pkginfo,owner=None,block=None,extra_arches=None,force=False,update=False):
+def pkglist_add(taginfo,pkginfo,owner=None,block=None,extra_arches=None,arch_variants=None,force=False,update=False):
     """Add to (or update) package list for tag"""
     #access control comes a little later (via an assert_policy)
     #should not make any changes until after policy is checked
@@ -863,7 +863,7 @@ def pkglist_add(taginfo,pkginfo,owner=None,block=None,extra_arches=None,force=Fa
     if not pkg:
         pkg = lookup_package(pkginfo, create=True)
     koji.plugin.run_callbacks('prePackageListChange', action=action, tag=tag, package=pkg, owner=owner,
-                              block=block, extra_arches=extra_arches, force=force, update=update)
+                              block=block, extra_arches=extra_arches, arch_variants=arch_variants, force=force, update=update)
     # first check to see if package is:
     #   already present (via inheritance)
     #   blocked
@@ -888,11 +888,14 @@ def pkglist_add(taginfo,pkginfo,owner=None,block=None,extra_arches=None,force=Fa
             block = bool(block)
         if extra_arches is None:
             extra_arches = previous['extra_arches']
+        if arch_variants is None:
+            extra_arches = previous['arch_variants']
         #see if the data is the same
         changed = False
         for key,value in (('owner_id',owner),
                           ('blocked',block),
-                          ('extra_arches',extra_arches)):
+                          ('extra_arches',extra_arches),
+                          ('arch_variants',arch_variants)):
             if previous[key] != value:
                 changed = True
                 break
@@ -906,9 +909,9 @@ def pkglist_add(taginfo,pkginfo,owner=None,block=None,extra_arches=None,force=Fa
             owner = context.session.user_id
         else:
             raise koji.GenericError, "owner not specified"
-    _pkglist_add(tag_id, pkg['id'], owner, block, extra_arches)
+    _pkglist_add(tag_id, pkg['id'], owner, block, extra_arches, arch_variants)
     koji.plugin.run_callbacks('postPackageListChange', action=action, tag=tag, package=pkg, owner=owner,
-                              block=block, extra_arches=extra_arches, force=force, update=update)
+                              block=block, extra_arches=extra_arches, arch_variants=arch_variants, force=force, update=update)
 
 def pkglist_remove(taginfo,pkginfo,force=False):
     """Remove package from the list for tag
@@ -975,6 +978,10 @@ def pkglist_setowner(taginfo,pkginfo,owner,force=False):
 def pkglist_setarches(taginfo,pkginfo,arches,force=False):
     """Set extra_arches for package in tag"""
     pkglist_add(taginfo,pkginfo,extra_arches=arches,force=force,update=True)
+
+def pkglist_setvariants(taginfo,pkginfo,variants,force=False):
+    """Set arch_variants for package in tag"""
+    pkglist_add(taginfo,pkginfo,arch_variants=variants,force=force,update=True)
 
 def readPackageList(tagID=None, userID=None, pkgID=None, event=None, inherit=False, with_dups=False):
     """Returns the package list for the specified tag or user.
@@ -9066,6 +9073,7 @@ class RootExports(object):
     packageListUnblock = staticmethod(pkglist_unblock)
     packageListSetOwner = staticmethod(pkglist_setowner)
     packageListSetArches = staticmethod(pkglist_setarches)
+    packageListSetVariants = staticmethod(pkglist_setvariants)
 
     groupListAdd = staticmethod(grplist_add)
     groupListRemove = staticmethod(grplist_remove)

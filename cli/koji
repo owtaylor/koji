@@ -5875,6 +5875,23 @@ def handle_set_pkg_owner(options, session, args):
         #really should implement multicall...
         session.packageListSetOwner(tag,package,owner,force=options.force)
 
+def handle_set_pkg_variants(options, session, args):
+    "[admin] Set the list of architecture variants for a package"
+    usage = _("usage: %prog set-pkg-variants [options] variants tag package [package2 ...]")
+    usage += _("\n(Specify the --help global option for a list of other help options)")
+    parser = OptionParser(usage=usage)
+    parser.add_option("--force", action='store_true', help=_("Force operation"))
+    (options, args) = parser.parse_args(args)
+    if len(args) < 3:
+        parser.error(_("Please specify variants, a tag, and at least one package"))
+        assert False
+    activate_session(session)
+    variants = ' '.join(args[0].replace(',',' ').split())
+    tag = args[1]
+    for package in args[2:]:
+        #really should implement multicall...
+        session.packageListSetVariants(tag,package,variants,force=options.force)
+
 def handle_set_pkg_owner_global(options, session, args):
     "[admin] Set the owner for a package globally"
     usage = _("usage: %prog set-pkg-owner-global [options] owner package [package2 ...]")
