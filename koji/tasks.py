@@ -315,7 +315,8 @@ class BaseTaskHandler(object):
         For noarch tasks, find a canonical arch that is supported by both the host and tag.
         If the arch is anything other than noarch, return it unmodified.
         """
-        if arch != "noarch":
+        base_arch, variant = koji.splitArch(arch)
+        if base_arch != "noarch":
             return arch
 
         # We need a concrete arch. Pick one that:
@@ -330,8 +331,8 @@ class BaseTaskHandler(object):
             raise koji.BuildError, "No arch list for tag: %s" % tag['name']
         # index canonical host arches
         host_arches = set([koji.canonArch(a) for a in host_arches.split()])
-        # index canonical tag arches
-        tag_arches = set([koji.canonArch(a) for a in tag_arches.split()])
+        # index canonical tag arches matching this variant
+        tag_arches = set([koji.splitArch(koji.canonArch(a))[0] for a in tag_arches.split() if koji.splitArch(a)[1] == variant])
         # find the intersection of host and tag arches
         common_arches = list(host_arches & tag_arches)
         if common_arches:
@@ -341,7 +342,10 @@ class BaseTaskHandler(object):
             random.seed()
             arch = random.choice(common_arches)
             self.logger.info('Valid arches: %s, using: %s' % (' '.join(common_arches), arch))
-            return arch
+            if variant:
+                return arch + '~' + variant
+            else:
+                return arch
         else:
             # no overlap
             raise koji.BuildError, "host %s (%s) does not support any arches of tag %s (%s)" % \

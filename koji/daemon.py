@@ -789,7 +789,7 @@ class TaskManager(object):
                     if self.takeTask(task):
                         return True
             elif task['state'] == koji.TASK_STATES['FREE']:
-                bin = "%(channel_id)s:%(arch)s" % task
+                bin = "%s:%s" % (task['channel_id'], koji.splitArch(task['arch'])[0])
                 self.logger.debug("task is free, bin=%r" % bin)
                 if not bins.has_key(bin):
                     continue

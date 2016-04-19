@@ -200,11 +200,12 @@ class BuildRoot(object):
         elif repo_state != 'READY':
             raise koji.BuildrootError, "Requested repo (%i) is %s" % (repo_id, repo_state)
         self.br_arch = koji.canonArch(arch)
+        base_arch, arch_variant = koji.splitArch(arch)
         # armhfp is not a valid arch according to autoconf
-        if arch == 'armhfp':
+        if base_arch == 'armhfp':
             self.target_arch = 'arm'
         else:
-            self.target_arch = arch
+            self.target_arch = base_arch
         self.logger.debug("New buildroot: %(tag_name)s/%(br_arch)s/%(repoid)s" % vars(self))
         id = self.session.host.newBuildRoot(self.repoid, self.br_arch, task_id=task_id)
         if id is None:
@@ -833,11 +834,13 @@ class BuildTask(BaseTaskHandler):
         data = koji.get_header_fields(h,['name','version','release','epoch'])
         data['task_id'] = self.id
         extra_arches = None
+        arch_variants = None
         self.logger.info("Reading package config for %(name)s" % data)
         pkg_cfg = self.session.getPackageConfig(dest_tag,data['name'],event=self.event_id)
         self.logger.debug("%r" % pkg_cfg)
         if pkg_cfg is not None:
             extra_arches = pkg_cfg.get('extra_arches')
+            arch_variants = pkg_cfg.get('arch_variants')
         if not self.opts.get('skip_tag') and not self.opts.get('scratch'):
             # Make sure package is on the list for this tag
             if pkg_cfg is None:
@@ -847,7 +850,7 @@ class BuildTask(BaseTaskHandler):
                 raise koji.BuildError, "package %s is blocked for tag %s" \
                         % (data['name'], target_info['dest_tag_name'])
             # TODO - more pre tests
-        archlist = self.getArchList(build_tag, h, extra=extra_arches)
+        archlist = self.getArchList(build_tag, h, extra=extra_arches, arch_variants=arch_variants)
         #let the system know about the build we're attempting
         if not self.opts.get('scratch'):
             #scratch builds do not get imported
@@ -909,7 +912,12 @@ class BuildTask(BaseTaskHandler):
             raise koji.BuildError, "%s is not a source package" % srpm
         return h
 
-    def getArchList(self, build_tag, h, extra=None):
+    def getArchList(self, build_tag, h, extra=None, arch_variants=None):
+        if not arch_variants:
+            arch_variants = 'MAIN'
+        else:
+            arch_variants = arch_variants.strip()
+
         # get list of arches to build for
         buildconfig = self.session.getBuildConfig(build_tag, event=self.event_id)
         arches = buildconfig['arches']
@@ -921,7 +929,9 @@ class BuildTask(BaseTaskHandler):
         if extra:
             self.logger.debug('Got extra arches: %s' % extra)
             arches = "%s %s" % (arches,extra)
+
         archlist = arches.split()
+        archlist = sorted({ koji.splitArch(a)[0] for a in archlist})
         self.logger.debug('base archlist: %r' % archlist)
         # - adjust arch list based on srpm macros
         buildarchs = h[rpm.RPMTAG_BUILDARCHS]
@@ -940,6 +950,19 @@ class BuildTask(BaseTaskHandler):
         if 'noarch' not in excludearch and \
                 ( 'noarch' in buildarchs or 'noarch' in exclusivearch ):
             archlist.append('noarch')
+
+        # Now add in the architecture variants
+        if arch_variants != 'MAIN':
+            variants = arch_variants.split()
+            new_archlist = []
+            for arch in archlist:
+                for variant in variants:
+                    if variant == 'MAIN':
+                        new_archlist.append(arch)
+                    else:
+                        new_archlist.append(arch + '~' + variant)
+            archlist = new_archlist
+
         override = self.opts.get('arch_override')
         if self.opts.get('scratch') and override:
             #only honor override for scratch builds
@@ -949,7 +972,13 @@ class BuildTask(BaseTaskHandler):
         for a in archlist:
             # Filter based on canonical arches for tag
             # This prevents building for an arch that we can't handle
-            if a == 'noarch' or koji.canonArch(a) in tag_archlist:
+            b, v = koji.splitArch(a)
+            if b == 'noarch':
+                for ta in tag_archlist:
+                    if koji.splitArch(ta)[1] == v:
+                        archdict[a] = 1
+                        break
+            elif koji.canonArch(a) in tag_archlist:
                 archdict[a] = 1
         if not archdict:
             raise koji.BuildError, "No matching arches were found"
@@ -959,17 +988,25 @@ class BuildTask(BaseTaskHandler):
         self.logger.debug("Spawning jobs for arches: %r" % (archlist))
         subtasks = {}
         keep_srpm = True
+
+        # If we have non-variant builds, we want to use one of those for the SRPM
+        all_variant = all(koji.archHasVariant(a) for a in archlist)
+
         for arch in archlist:
             if koji.util.multi_fnmatch(arch, self.options.literal_task_arches):
                 taskarch = arch
             else:
                 taskarch = koji.canonArch(arch)
+
+            this_keep_srpm = all_variant or not koji.archHasVariant(arch)
+
             subtasks[arch] = self.session.host.subtask(method='buildArch',
-                                                       arglist=[srpm, build_tag, arch, keep_srpm, {'repo_id': repo_id}],
+                                                       arglist=[srpm, build_tag, arch, this_keep_srpm, {'repo_id': repo_id}],
                                                        label=arch,
                                                        parent=self.id,
                                                        arch=taskarch)
-            keep_srpm = False
+            if this_keep_srpm:
+                keep_srpm = False
 
         self.logger.debug("Got subtasks: %r" % (subtasks))
         self.logger.debug("Waiting on subtasks...")
@@ -1029,9 +1066,9 @@ class BaseBuildTask(BaseTaskHandler):
             opts['event'] = event
         tag = self.session.getBuildConfig(tagref, **opts)
         if tag and tag['arches']:
-            tag_arches = [koji.canonArch(a) for a in tag['arches'].split()]
+            tag_arches = {koji.splitArch(koji.canonArch(a))[0] for a in tag['arches'].split()}
             host_arches = hostdata['arches'].split()
-            if not set(tag_arches).intersection(host_arches):
+            if not tag_arches.intersection(host_arches):
                 self.logger.info('Task %s (%s): tag arches (%s) and ' \
                                  'host arches (%s) are disjoint' % \
                                  (self.id, self.method,
@@ -1116,6 +1153,11 @@ class BuildArchTask(BaseBuildTask):
         rootopts = {
             'repo_id': repo_id
             }
+
+        base_arch, arch_variant = koji.splitArch(arch)
+        if arch_variant:
+            rootopts['install_group'] = arch_variant + '-' + 'build'
+
         br_arch = self.find_arch(arch, self.session.host.getHost(), self.session.getBuildConfig(root, event=event_id))
         broot = BuildRoot(self.session, self.options, root, br_arch, self.id, **rootopts)
         broot.workdir = self.workdir
@@ -1125,7 +1167,7 @@ class BuildArchTask(BaseBuildTask):
 
         # run build
         self.logger.debug("Running build")
-        broot.build(fn,arch)
+        broot.build(fn,base_arch)
 
         # extract results
         resultdir = broot.resultdir()

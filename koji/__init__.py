@@ -916,7 +916,25 @@ def is_debuginfo(name):
         return True
     return False
 
-def canonArch(arch):
+def splitArch(arch):
+    tilde = arch.find('~')
+    if tilde >= 0:
+        return arch[0:tilde], arch[tilde + 1:]
+    else:
+        return arch, None
+
+def archHasVariant(arch):
+    return '~' in arch
+
+_variant_pattern = re.compile(r'^(.*?)~[a-zA-Z0-9_]+([^-]*?\.[^.-]+\.rpm)$')
+def strip_filename_variant(filename):
+    m = _variant_pattern.match(filename)
+    if m:
+        return m.group(1) + m.group(2)
+    else:
+        return filename
+
+def _canonArch(arch):
     """Given an arch, return the "canonical" arch"""
     #XXX - this could stand to be smarter, and we should probably
     #   have some other related arch-mangling functions.
@@ -940,6 +958,13 @@ def canonArch(arch):
         return 'arm'
     else:
         return arch
+
+def canonArch(arch):
+    base_arch, variant = splitArch(arch)
+    if variant:
+        return _canonArch(base_arch) + '~' + variant
+    else:
+        return _canonArch(arch)
 
 class POMHandler(xml.sax.handler.ContentHandler):
     def __init__(self, values, fields):
@@ -1659,8 +1684,15 @@ class PathInfo(object):
         return self.build(build) + '/images'
 
     def rpm(self,rpminfo):
+        base_arch, variant = splitArch(rpminfo['arch'])
+
         """Return the path (relative to build_dir) where an rpm belongs"""
-        return "%(arch)s/%(name)s-%(version)s-%(release)s.%(arch)s.rpm" % rpminfo
+        if variant:
+            # FIXME: this doesn't handle the case of gimp-2.8.16-1.fc24~app.1.x86_64; we need
+            # to actually save the original release
+            return "%(arch)s/%(name)s-%(version)s-%(release)s" % rpminfo + "~%s.%s.rpm" % (variant, base_arch)
+        else:
+            return "%(arch)s/%(name)s-%(version)s-%(release)s.%(arch)s.rpm" % rpminfo
 
     def signed(self, rpminfo, sigkey):
         """Return the path (relative to build dir) where a signed rpm lives"""

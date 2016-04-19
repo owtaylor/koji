@@ -998,6 +998,7 @@ def readPackageList(tagID=None, userID=None, pkgID=None, event=None, inherit=Fal
               ('tag.id', 'tag_id'), ('tag.name', 'tag_name'),
               ('users.id', 'owner_id'), ('users.name', 'owner_name'),
               ('extra_arches','extra_arches'),
+              ('arch_variants','arch_variants'),
               ('tag_packages.blocked', 'blocked'))
     flist = ', '.join([pair[0] for pair in fields])
     cond = eventCondition(event)
@@ -2078,7 +2079,7 @@ def get_active_tasks(host=None):
         values['host_id'] = host['id']
         clause = '(state = %(ASSIGNED)i AND host_id = %(host_id)i)'
         if values['channels']:
-            clause += ''' OR (state = %(FREE)i AND arch IN %(arches)s \
+            clause += ''' OR (state = %(FREE)i AND regexp_replace(arch, '~.*', '') IN %(arches)s \
 AND channel_id IN %(channels)s)'''
         clauses = [clause]
     else:
@@ -2193,6 +2194,26 @@ def maven_tag_archives(tag_id, event_id=None, inherit=True):
                     yield archive
     return _iter_archives()
 
+def filter_variant_pkglist(pkglist_file, variant):
+    pat = re.compile(r'^(.*?)~' + variant + '([^-]*?\.)([^.-]+)\.rpm\n$')
+    seen_variant_packages = set()
+    with open(pkglist_file, 'r') as infile:
+        for relpath in infile:
+            m = pat.match(relpath)
+            if m:
+                relpath = (m.group(1) + m.group(2) + m.group(3) + ".rpm\n")
+                relpath = relpath.replace("/" + m.group(3) + "~" + variant + "/", "/" + m.group(3) + "/")
+                seen_variant_packages.add(relpath)
+    with open(pkglist_file, 'r') as infile:
+        with open(pkglist_file + '.new', 'w') as outfile:
+            for relpath in infile:
+                if 'eog' in relpath:
+                    print relpath, relpath in seen_variant_packages
+                if not relpath in seen_variant_packages:
+                    outfile.write(relpath)
+
+    os.rename(pkglist_file + '.new', pkglist_file)
+
 def repo_init(tag, with_src=False, with_debuginfo=False, event=None):
     """Create a new repo entry in the INIT state, return full repo data
 
@@ -2262,21 +2283,35 @@ def repo_init(tag, with_src=False, with_debuginfo=False, event=None):
             continue
         relpath = "%s/%s\n" % (builddirs[rpminfo['build_id']], relpathinfo.rpm(rpminfo))
         arch = rpminfo['arch']
+        base_arch, variant = koji.splitArch(arch)
         if arch == 'src':
             if with_src:
                 for repoarch in repo_arches:
                     pkglist[repoarch].write(relpath)
-        elif arch == 'noarch':
-            for repoarch in repo_arches:
-                pkglist[repoarch].write(relpath)
+        elif base_arch == 'noarch':
+            if variant:
+                suffix = '~' + variant
+                for repoarch in repo_arches:
+                    if repoarch.endswith(suffix):
+                        pkglist[repoarch].write(relpath)
+            else:
+                for repoarch in repo_arches:
+                    pkglist[repoarch].write(relpath)
         else:
             repoarch = koji.canonArch(arch)
-            if repoarch not in repo_arches:
-                # Do not create a repo for arches not in the arch list for this tag
-                continue
-            pkglist[repoarch].write(relpath)
+            if repoarch in repo_arches:
+                pkglist[repoarch].write(relpath)
+            if not variant:
+                prefix = repoarch + '~'
+                for ra in repo_arches:
+                    if ra.startswith(prefix):
+                        pkglist[ra].write(relpath)
     for repoarch in repo_arches:
         pkglist[repoarch].close()
+        _, variant = koji.splitArch(repoarch)
+        if variant:
+            filter_variant_pkglist(os.path.join(repodir, repoarch, 'pkglist'),
+                                   variant)
 
     #write blocked package lists
     for repoarch in repo_arches:
@@ -4532,6 +4567,17 @@ def check_noarch_rpms(basepath, rpms):
 
     return result
 
+def move_variant(rpminfo):
+    #move variant tag from the release into the architecture
+    m = re.match(r'^(.*?)(~[A-Za-z0-9_]+)(.*)$', rpminfo['release'])
+    if m:
+        # We allow the source rpm to have a variant (this will occur if all arch
+        # builds are variant builds - not the normal case but it can happen), in
+        # this case, we just drop the variant information
+        if not rpminfo.get('sourcepackage', 0) == 1:
+            rpminfo['arch'] += m.group(2)
+        rpminfo['release'] = m.group(1) + m.group(3)
+
 def import_build(srpm, rpms, brmap=None, task_id=None, build_id=None, logs=None):
     """Import a build into the database (single transaction)
 
@@ -4569,6 +4615,8 @@ def import_build(srpm, rpms, brmap=None, task_id=None, build_id=None, logs=None)
     fn = "%s/%s" % (uploadpath,srpm)
     build = koji.get_header_fields(fn,('name','version','release','epoch',
                                         'sourcepackage'))
+    move_variant(build)
+
     if build['sourcepackage'] != 1:
         raise koji.GenericError, "not a source package: %s" % fn
     build['task_id'] = task_id
@@ -4608,7 +4656,6 @@ def import_build(srpm, rpms, brmap=None, task_id=None, build_id=None, logs=None)
                               task_id=task_id, build_id=build_id, build=binfo, logs=logs)
     return binfo
 
-
 def import_rpm(fn, buildinfo=None, brootid=None, wrapper=False, fileinfo=None):
     """Import a single rpm into the database
 
@@ -4617,18 +4664,22 @@ def import_rpm(fn, buildinfo=None, brootid=None, wrapper=False, fileinfo=None):
     if not os.path.exists(fn):
         raise koji.GenericError, "no such file: %s" % fn
 
+    basename = os.path.basename(fn)
+
     #read rpm info
     hdr = koji.get_rpm_header(fn)
     rpminfo = koji.get_header_fields(hdr,['name','version','release','epoch',
                     'sourcepackage','arch','buildtime','sourcerpm'])
+
     if rpminfo['sourcepackage'] == 1:
         rpminfo['arch'] = "src"
 
     #sanity check basename
-    basename = os.path.basename(fn)
     expected = "%(name)s-%(version)s-%(release)s.%(arch)s.rpm" % rpminfo
     if basename != expected:
         raise koji.GenericError, "bad filename: %s (expected %s)" % (basename,expected)
+
+    move_variant(rpminfo)
 
     if buildinfo is None:
         #figure it out for ourselves
@@ -4653,12 +4704,14 @@ def import_rpm(fn, buildinfo=None, brootid=None, wrapper=False, fileinfo=None):
         # only enforce the srpm name matching the build for non-wrapper rpms
         srpmname = "%(name)s-%(version)s-%(release)s.src.rpm" % buildinfo
         #either the sourcerpm field should match the build, or the filename
-        #itself (for the srpm)
+        #itself (for the srpm). We allow the source RPM name to contain a
+        #variant string, because the source RPM for a variant build will be
+        #built with the dist tag containing a variant.
         if rpminfo['sourcepackage'] != 1:
-            if rpminfo['sourcerpm'] != srpmname:
+            if koji.strip_filename_variant(rpminfo['sourcerpm']) != srpmname:
                 raise koji.GenericError, "srpm mismatch for %s: %s (expected %s)" \
                         % (fn,rpminfo['sourcerpm'],srpmname)
-        elif basename != srpmname:
+        elif koji.strip_filename_variant(basename) != srpmname:
             raise koji.GenericError, "srpm mismatch for %s: %s (expected %s)" \
                     % (fn,basename,srpmname)
 
@@ -5284,7 +5337,7 @@ def merge_scratch(task_id):
                 'logs': []}
         for output in list_task_output(child['id']):
             if output.endswith('.src.rpm'):
-                srpm_name = os.path.basename(output)
+                srpm_name = koji.strip_filename_variant(os.path.basename(output))
                 if not srpm:
                     srpm = srpm_name
                 else:
@@ -10417,6 +10470,7 @@ class BuildRoot(object):
                 data = add_external_rpm(an_rpm, location, strict=False)
                 #will add if missing, compare if not
             else:
+                move_variant(an_rpm)
                 data = get_rpm(an_rpm, strict=True)
             rpm_id = data['id']
             if update and rpm_id in current:
@@ -10668,6 +10722,7 @@ class Host(object):
             return [[], []]
         #host is the host making the call
         tasks = get_active_tasks(host)
+
         return [hosts, tasks]
 
     def getTask(self):
